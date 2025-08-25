@@ -21,6 +21,12 @@ Una herramienta CLI para extraer artículos de códigos penales en formato PDF y
 sudo apt update
 sudo apt install poppler-utils nlohmann-json3-dev g++
 
+# Fedora
+sudo dnf install poppler-utils nlohmann-json-devel gcc-c++
+
+# O para versiones más antiguas de Fedora/RHEL/CentOS:
+# sudo yum install poppler-utils nlohmann-json-devel gcc-c++
+
 # Compilar el programa
 g++ -std=c++17 -o codex codex.cpp -lstdc++fs -pthread
 ```
