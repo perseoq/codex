@@ -1,6 +1,6 @@
-# Codex - Extractor de Códigos Penales
+# Codex - Extractor de Códigos Legales
 
-Una herramienta CLI para extraer artículos de códigos penales en formato PDF y convertirlos a JSON estructurado.
+Una herramienta CLI para extraer artículos de códigos en formato PDF y convertirlos a JSON estructurado.
 
 ## Características
 
