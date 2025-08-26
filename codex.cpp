@@ -3,7 +3,6 @@
 #include <iostream>
 #include <fstream>
 #include <sstream>
-#include <regex>
 #include <string>
 #include <vector>
 #include <unordered_map>
@@ -12,6 +11,8 @@
 #include <future>
 #include <thread>
 #include <chrono>
+#include <algorithm>
+#include <cctype>
 #include <nlohmann/json.hpp>
 
 using json = nlohmann::json;
@@ -21,6 +22,66 @@ struct Articulo {
     std::string articulo;
     std::string contenido;
 };
+
+// Función para limpiar caracteres no UTF-8
+std::string limpiarUTF8(const std::string& texto) {
+    std::string resultado;
+    resultado.reserve(texto.size());
+    
+    for (size_t i = 0; i < texto.size(); ++i) {
+        unsigned char c = texto[i];
+        
+        // Caracteres ASCII válidos (0-127)
+        if (c <= 0x7F) {
+            resultado += c;
+        }
+        // Caracteres UTF-8 de 2 bytes (inicio: 110xxxxx)
+        else if (c >= 0xC2 && c <= 0xDF) {
+            if (i + 1 < texto.size()) {
+                unsigned char c2 = texto[i + 1];
+                if (c2 >= 0x80 && c2 <= 0xBF) {
+                    resultado += c;
+                    resultado += c2;
+                    i++;
+                }
+            }
+        }
+        // Caracteres UTF-8 de 3 bytes (inicio: 1110xxxx)
+        else if (c >= 0xE0 && c <= 0xEF) {
+            if (i + 2 < texto.size()) {
+                unsigned char c2 = texto[i + 1];
+                unsigned char c3 = texto[i + 2];
+                if (c2 >= 0x80 && c2 <= 0xBF && c3 >= 0x80 && c3 <= 0xBF) {
+                    resultado += c;
+                    resultado += c2;
+                    resultado += c3;
+                    i += 2;
+                }
+            }
+        }
+        // Caracteres UTF-8 de 4 bytes (inicio: 11110xxx)
+        else if (c >= 0xF0 && c <= 0xF4) {
+            if (i + 3 < texto.size()) {
+                unsigned char c2 = texto[i + 1];
+                unsigned char c3 = texto[i + 2];
+                unsigned char c4 = texto[i + 3];
+                if (c2 >= 0x80 && c2 <= 0xBF && c3 >= 0x80 && c3 <= 0xBF && c4 >= 0x80 && c4 <= 0xBF) {
+                    resultado += c;
+                    resultado += c2;
+                    resultado += c3;
+                    resultado += c4;
+                    i += 3;
+                }
+            }
+        }
+        // Reemplazar caracteres inválidos con espacio
+        else {
+            resultado += ' ';
+        }
+    }
+    
+    return resultado;
+}
 
 // Leer archivo completo a string
 std::string loadFile(const std::string &filename) {
@@ -36,7 +97,8 @@ std::future<std::string> convertirPDFAsync(const std::string& pdfPath) {
     return std::async(std::launch::async, [pdfPath]() {
         std::string tempTxt = fs::temp_directory_path() / ("salida_temp_" + std::to_string(std::time(nullptr)) + ".txt");
         
-        std::string comando = "pdftotext -layout \"" + pdfPath + "\" \"" + tempTxt + "\"";
+        // Usar -enc UTF-8 para forzar encoding UTF-8
+        std::string comando = "pdftotext -enc UTF-8 -layout \"" + pdfPath + "\" \"" + tempTxt + "\"";
         int resultado = system(comando.c_str());
         
         if (resultado != 0) {
@@ -50,7 +112,8 @@ std::future<std::string> convertirPDFAsync(const std::string& pdfPath) {
         std::string texto = loadFile(tempTxt);
         fs::remove(tempTxt);
         
-        return texto;
+        // Limpiar UTF-8
+        return limpiarUTF8(texto);
     });
 }
 
@@ -79,65 +142,123 @@ std::string quitarHeadersFooters(const std::vector<std::string> &paginas) {
     return limpio.str();
 }
 
-// Función mejorada para extraer artículos con múltiples patrones
-std::vector<Articulo> extraerArticulosMejorado(const std::string &texto) {
+// Función para limpiar espacios múltiples
+std::string limpiarEspacios(const std::string& texto) {
+    std::string resultado;
+    bool espacio_previo = false;
+    
+    for (char c : texto) {
+        if (std::isspace(c)) {
+            if (!espacio_previo) {
+                resultado += ' ';
+                espacio_previo = true;
+            }
+        } else {
+            resultado += c;
+            espacio_previo = false;
+        }
+    }
+    
+    // Eliminar espacios al inicio y final
+    size_t start = resultado.find_first_not_of(" ");
+    size_t end = resultado.find_last_not_of(" ");
+    
+    if (start == std::string::npos || end == std::string::npos) {
+        return "";
+    }
+    
+    return resultado.substr(start, end - start + 1);
+}
+
+// Función para verificar si una línea es inicio de artículo
+bool esInicioArticulo(const std::string& linea, std::string& articulo_completo) {
+    // Convertir a minúsculas para búsqueda case-insensitive
+    std::string linea_min = linea;
+    std::transform(linea_min.begin(), linea_min.end(), linea_min.begin(), ::tolower);
+    
+    // Buscar patrones de artículo
+    size_t pos = std::string::npos;
+    std::string patron;
+    
+    if (linea_min.find("articulo") != std::string::npos) {
+        pos = linea_min.find("articulo");
+        patron = "articulo";
+    } else if (linea_min.find("artículo") != std::string::npos) {
+        pos = linea_min.find("artículo");
+        patron = "artículo";
+    } else if (linea_min.find("art.") != std::string::npos) {
+        pos = linea_min.find("art.");
+        patron = "art.";
+    }
+    
+    if (pos == std::string::npos) {
+        return false;
+    }
+    
+    // Extraer el texto completo del artículo
+    articulo_completo = linea.substr(pos);
+    
+    // Verificar que sigue con un número
+    size_t num_pos = pos + patron.size();
+    if (num_pos >= linea.size()) {
+        return false;
+    }
+    
+    // Buscar el número después del artículo
+    std::string resto = linea.substr(num_pos);
+    size_t digito_pos = resto.find_first_of("0123456789");
+    
+    if (digito_pos == std::string::npos) {
+        return false;
+    }
+    
+    return true;
+}
+
+// Función principal para extraer artículos sin usar regex
+std::vector<Articulo> extraerArticulosManual(const std::string &texto) {
     std::vector<Articulo> articulos;
     
     if (texto.empty()) {
         return articulos;
     }
     
-    // Múltiples patrones para capturar diferentes formatos de artículos
-    std::vector<std::regex> patrones = {
-        std::regex(R"(Artículo\s+(\d+)(?:o|°)?(?:\s+([A-Za-záéíóúÁÉÍÓÚñÑ]+))?\s*\.-)", std::regex::icase),
-        std::regex(R"(ARTÍCULO\s+(\d+)(?:o|°)?(?:\s+([A-Za-záéíóúÁÉÍÓÚñÑ]+))?\s*\.-)", std::regex::icase),
-        std::regex(R"(Art\.\s*(\d+)(?:o|°)?(?:\s+([A-Za-záéíóúÁÉÍÓÚñÑ]+))?\s*\.-)", std::regex::icase),
-        std::regex(R"(artículo\s+(\d+)(?:o|°)?(?:\s+([A-Za-záéíóúÁÉÍÓÚñÑ]+))?\s*\.-)", std::regex::icase)
-    };
+    std::istringstream stream(texto);
+    std::string linea;
+    std::vector<std::pair<size_t, std::string>> inicios_articulos;
+    size_t posicion_actual = 0;
     
-    // Encontrar todas las posiciones de inicio de artículos
-    std::vector<std::pair<size_t, std::string>> inicios;
-    
-    for (const auto& patron : patrones) {
-        std::sregex_iterator it(texto.begin(), texto.end(), patron);
-        std::sregex_iterator end;
-        
-        for (; it != end; ++it) {
-            size_t pos = it->position();
-            std::string match = it->str();
-            inicios.emplace_back(pos, match);
+    // Primera pasada: encontrar todas las líneas que son artículos
+    while (std::getline(stream, linea)) {
+        std::string articulo_completo;
+        if (esInicioArticulo(linea, articulo_completo)) {
+            inicios_articulos.emplace_back(posicion_actual, articulo_completo);
         }
+        posicion_actual += linea.size() + 1; // +1 por el salto de línea
     }
     
-    // Ordenar por posición
-    std::sort(inicios.begin(), inicios.end(), 
-        [](const auto& a, const auto& b) { return a.first < b.first; });
+    std::cout << "🔍 Encontrados " << inicios_articulos.size() << " posibles inicios de artículos" << std::endl;
     
-    // Eliminar duplicados (misma posición)
-    inicios.erase(std::unique(inicios.begin(), inicios.end(), 
-        [](const auto& a, const auto& b) { return a.first == b.first; }), inicios.end());
-    
-    // Extraer contenido entre artículos
-    for (size_t i = 0; i < inicios.size(); ++i) {
-        size_t inicio_pos = inicios[i].first;
-        const std::string& encabezado = inicios[i].second;
+    // Segunda pasada: extraer contenido entre artículos
+    for (size_t i = 0; i < inicios_articulos.size(); ++i) {
+        size_t inicio_pos = inicios_articulos[i].first;
+        const std::string& encabezado = inicios_articulos[i].second;
         
         size_t contenido_inicio = inicio_pos + encabezado.size();
-        size_t contenido_fin = (i + 1 < inicios.size()) ? inicios[i + 1].first : texto.size();
+        size_t contenido_fin = (i + 1 < inicios_articulos.size()) ? inicios_articulos[i + 1].first : texto.size();
         
-        if (contenido_inicio < contenido_fin) {
+        if (contenido_inicio < contenido_fin && (contenido_fin - contenido_inicio) > 10) {
             std::string contenido = texto.substr(contenido_inicio, contenido_fin - contenido_inicio);
             
             // Limpiar contenido
-            contenido = std::regex_replace(contenido, std::regex("\\s+"), " ");
-            contenido = std::regex_replace(contenido, std::regex("^\\s+|\\s+$"), "");
+            contenido = limpiarEspacios(contenido);
             
-            // Eliminar números de página u otros artefactos comunes
-            contenido = std::regex_replace(contenido, std::regex("\\b\\d+\\s*\\/\\s*\\d+\\b"), "");
-            contenido = std::regex_replace(contenido, std::regex("^\\d+\\s*$"), "");
-            
-            if (!contenido.empty() && contenido.size() > 10) { // Mínimo 10 caracteres
-                articulos.push_back({encabezado, contenido});
+            if (!contenido.empty() && contenido.size() > 20) {
+                // Limpiar UTF-8 del contenido también
+                std::string contenido_limpio = limpiarUTF8(contenido);
+                std::string encabezado_limpio = limpiarUTF8(encabezado);
+                
+                articulos.push_back({encabezado_limpio, contenido_limpio});
             }
         }
     }
@@ -145,83 +266,55 @@ std::vector<Articulo> extraerArticulosMejorado(const std::string &texto) {
     return articulos;
 }
 
-// Función alternativa: búsqueda por líneas para documentos complejos
-std::vector<Articulo> extraerPorLineas(const std::string& texto) {
-    std::vector<Articulo> articulos;
+// Función para analizar el texto y detectar patrones
+void analizarPatronesTexto(const std::string& texto) {
+    std::cout << "🔍 Analizando patrones en el texto..." << std::endl;
+    
+    int count_articulo = 0;
+    int count_articulo_decimal = 0;
+    std::vector<std::string> ejemplos;
+    
     std::istringstream stream(texto);
     std::string linea;
-    std::string articulo_actual;
-    std::string contenido_actual;
-    bool en_articulo = false;
-    
-    // Patrones para identificar inicio de artículos
-    std::regex patron_articulo(R"(Artículo\s+\d+(?:o|°)?(?:\s+[A-Za-záéíóúÁÉÍÓÚñÑ]+)?\s*\.-)", std::regex::icase);
-    std::regex patron_articulo_alt(R"(ARTÍCULO\s+\d+(?:o|°)?(?:\s+[A-Za-záéíóúÁÉÍÓÚñÑ]+)?\s*\.-)", std::regex::icase);
-    std::regex patron_art(R"(Art\.\s*\d+(?:o|°)?(?:\s+[A-Za-záéíóúÁÉÍÓÚñÑ]+)?\s*\.-)", std::regex::icase);
     
     while (std::getline(stream, linea)) {
-        // Limpiar línea
-        linea = std::regex_replace(linea, std::regex("^\\s+|\\s+$"), "");
-        
-        if (linea.empty()) continue;
-        
-        // Verificar si es inicio de artículo
-        if (std::regex_search(linea, patron_articulo) || 
-            std::regex_search(linea, patron_articulo_alt) || 
-            std::regex_search(linea, patron_art)) {
+        std::string articulo_completo;
+        if (esInicioArticulo(linea, articulo_completo)) {
+            count_articulo++;
             
-            // Guardar artículo anterior si existe
-            if (!articulo_actual.empty() && !contenido_actual.empty()) {
-                contenido_actual = std::regex_replace(contenido_actual, std::regex("\\s+"), " ");
-                contenido_actual = std::regex_replace(contenido_actual, std::regex("^\\s+|\\s+$"), "");
-                if (!contenido_actual.empty()) {
-                    articulos.push_back({articulo_actual, contenido_actual});
-                }
+            // Verificar si es decimal
+            if (articulo_completo.find('.') != std::string::npos) {
+                count_articulo_decimal++;
             }
             
-            // Nuevo artículo
-            articulo_actual = linea;
-            contenido_actual = "";
-            en_articulo = true;
-        } 
-        else if (en_articulo) {
-            // Continuar acumulando contenido
-            if (!contenido_actual.empty()) {
-                contenido_actual += " ";
+            // Guardar algunos ejemplos
+            if (ejemplos.size() < 3) {
+                ejemplos.push_back(limpiarUTF8(articulo_completo));
             }
-            contenido_actual += linea;
         }
     }
     
-    // Guardar último artículo
-    if (!articulo_actual.empty() && !contenido_actual.empty()) {
-        contenido_actual = std::regex_replace(contenido_actual, std::regex("\\s+"), " ");
-        contenido_actual = std::regex_replace(contenido_actual, std::regex("^\\s+|\\s+$"), "");
-        if (!contenido_actual.empty()) {
-            articulos.push_back({articulo_actual, contenido_actual});
+    std::cout << "   • Artículos encontrados: " << count_articulo << std::endl;
+    std::cout << "   • Artículos decimales: " << count_articulo_decimal << std::endl;
+    
+    if (!ejemplos.empty()) {
+        std::cout << "   • Ejemplos:" << std::endl;
+        for (const auto& ejemplo : ejemplos) {
+            std::cout << "     → \"" << ejemplo << "\"" << std::endl;
         }
     }
-    
-    return articulos;
 }
 
 // Función asíncrona para procesamiento pesado
 std::future<std::vector<Articulo>> procesarArticulosAsync(const std::string& texto) {
     return std::async(std::launch::async, [texto]() {
-        // Primero intentar con el método mejorado
-        auto articulos = extraerArticulosMejorado(texto);
+        // Primero analizar los patrones presentes
+        analizarPatronesTexto(texto);
         
-        // Si no encuentra suficientes artículos, probar con el método por líneas
-        if (articulos.size() < 10) {
-            std::cout << "⚠️  Pocos artículos encontrados (" << articulos.size() 
-                      << "), intentando método alternativo..." << std::endl;
-            auto articulos_alt = extraerPorLineas(texto);
-            
-            if (articulos_alt.size() > articulos.size()) {
-                return articulos_alt;
-            }
-        }
+        // Intentar con el método manual
+        auto articulos = extraerArticulosManual(texto);
         
+        std::cout << "✅ " << articulos.size() << " artículos extraídos" << std::endl;
         return articulos;
     });
 }
@@ -242,7 +335,7 @@ void mostrarAyuda(const std::string& nombrePrograma) {
 
 // Función para mostrar versión
 void mostrarVersion() {
-    std::cout << "codex v1.2 (mejorado)\n"
+    std::cout << "codex v2.1 (UTF-8 fix)\n"
               << "Herramienta para extraer artículos de códigos penales desde PDF\n";
 }
 
@@ -268,29 +361,11 @@ void procesarPDFAsync(const std::string& pdfPath, const std::string& jsonPath) {
     std::string texto = futuroTexto.get();
     std::cout << "✅ PDF convertido: " << texto.size() << " caracteres" << std::endl;
     
-    if (texto.size() < 1000) {
-        std::cout << "⚠️  El texto parece muy corto, puede haber errores" << std::endl;
-    }
-    
     // Guardar texto completo para depuración
     std::ofstream debug_raw("debug_texto_completo.txt");
     debug_raw << texto;
     debug_raw.close();
     std::cout << "📁 Texto completo guardado en: debug_texto_completo.txt" << std::endl;
-    
-    // Mostrar primeras líneas para diagnóstico
-    std::istringstream preview_stream(texto);
-    std::string linea;
-    int line_count = 0;
-    std::cout << "\n🔍 Vista previa de las primeras líneas:" << std::endl;
-    std::cout << "========================================" << std::endl;
-    while (std::getline(preview_stream, linea) && line_count < 10) {
-        if (!linea.empty() && linea.size() > 3) {
-            std::cout << "Línea " << (line_count + 1) << ": " << linea << std::endl;
-            line_count++;
-        }
-    }
-    std::cout << "========================================" << std::endl;
     
     // Procesar páginas
     std::cout << "📄 Procesando páginas..." << std::endl;
@@ -309,37 +384,63 @@ void procesarPDFAsync(const std::string& pdfPath, const std::string& jsonPath) {
     std::cout << std::endl;
     
     auto articulos = futuroArticulos.get();
-    std::cout << "✅ " << articulos.size() << " artículos encontrados" << std::endl;
     
     if (articulos.empty()) {
         std::cout << "❌ No se encontraron artículos. Revisa el archivo debug_texto_completo.txt" << std::endl;
         return;
     }
     
-    // Mostrar primeros artículos para verificación
-    std::cout << "\n📋 Primeros artículos encontrados:" << std::endl;
+    // Mostrar estadísticas de artículos
+    std::cout << "\n📊 Estadísticas de artículos:" << std::endl;
     std::cout << "========================================" << std::endl;
-    for (size_t i = 0; i < std::min(articulos.size(), size_t(3)); ++i) {
+    for (size_t i = 0; i < std::min(articulos.size(), size_t(5)); ++i) {
         std::cout << "Artículo " << (i + 1) << ": " << articulos[i].articulo << std::endl;
-        std::cout << "Contenido (inicio): " 
-                  << articulos[i].contenido.substr(0, std::min(100, (int)articulos[i].contenido.size()))
-                  << "..." << std::endl;
+        std::cout << "Longitud: " << articulos[i].contenido.size() << " caracteres" << std::endl;
         std::cout << "----------------------------------------" << std::endl;
     }
     
-    // Guardar resultados
-    std::cout << "💾 Guardando JSON..." << std::endl;
-    json j;
-    for (const auto& articulo : articulos) {
-        j.push_back({{"articulo", articulo.articulo}, {"contenido", articulo.contenido}});
+    if (articulos.size() > 5) {
+        std::cout << "... y " << (articulos.size() - 5) << " artículos más" << std::endl;
     }
     
-    std::ofstream out(jsonPath);
-    out << j.dump(2);
-    out.close();
-    
-    std::cout << "✅ Archivo generado: " << jsonPath << std::endl;
-    std::cout << "🎉 Proceso completado exitosamente!" << std::endl;
+    // Guardar resultados con manejo de errores UTF-8
+    std::cout << "💾 Guardando JSON..." << std::endl;
+    try {
+        json j;
+        for (const auto& articulo : articulos) {
+            j.push_back({{"articulo", articulo.articulo}, {"contenido", articulo.contenido}});
+        }
+        
+        std::ofstream out(jsonPath);
+        out << j.dump(2);
+        out.close();
+        
+        std::cout << "✅ Archivo generado: " << jsonPath << std::endl;
+        std::cout << "🎉 Proceso completado exitosamente!" << std::endl;
+        
+    } catch (const std::exception& e) {
+        std::cerr << "❌ Error al guardar JSON: " << e.what() << std::endl;
+        
+        // Intentar guardar de forma más simple
+        std::cout << "🔄 Intentando guardar de forma alternativa..." << std::endl;
+        
+        std::ofstream out_simple(jsonPath);
+        out_simple << "[\n";
+        for (size_t i = 0; i < articulos.size(); ++i) {
+            out_simple << "  {\n";
+            out_simple << "    \"articulo\": \"" << articulos[i].articulo << "\",\n";
+            out_simple << "    \"contenido\": \"" << articulos[i].contenido << "\"\n";
+            out_simple << "  }";
+            if (i < articulos.size() - 1) {
+                out_simple << ",";
+            }
+            out_simple << "\n";
+        }
+        out_simple << "]\n";
+        out_simple.close();
+        
+        std::cout << "✅ Archivo generado (formato simple): " << jsonPath << std::endl;
+    }
 }
 
 int main(int argc, char* argv[]) {
