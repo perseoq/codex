@@ -104,6 +104,7 @@ La herramienta reconoce múltiples formatos de artículos:
 - `Artículo 1 Bis.-`
 - `Artículo 1 Ter.-`
 - `Art. 1.-`
+- `Artículo 1.1.-`
 - Y otras variaciones similares
 
 ## Diagnóstico y depuración
